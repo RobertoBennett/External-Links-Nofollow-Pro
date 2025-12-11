@@ -1,108 +1,153 @@
 <?php
 /**
- * Comprehensive External Links NoFollow Script
- * Обрабатывает внешние ссылки во всех местах сайта
+ * Plugin Name: External Links Nofollow
+ * Description: Автоматически добавляет rel="nofollow" ко всем внешним ссылкам
+ * Version: 2.0
  */
 
-// Основная функция обработки ссылок
+// Предотвращаем прямой доступ
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+/**
+ * Основная функция обработки ссылок
+ * 
+ * @param mixed $content Контент для обработки
+ * @return mixed Обработанный контент
+ */
 function add_nofollow_to_external_links( $content ) {
-    if ( empty( $content ) ) {
+    // Проверяем, что контент — строка и не пустой
+    if ( empty( $content ) || ! is_string( $content ) ) {
         return $content;
     }
     
-    // Получаем домен сайта
-    $home_url = home_url();
-    $home_domain = wp_parse_url( $home_url, PHP_URL_HOST );
+    // Получаем домен сайта (кешируем для производительности)
+    static $home_domain = null;
+    if ( $home_domain === null ) {
+        $home_url = home_url();
+        $home_domain = wp_parse_url( $home_url, PHP_URL_HOST );
+    }
     
-    // Регулярное выражение для поиска всех ссылок
-    $pattern = '/<a\s+(?:[^>]*?\s+)?href=(["\'])([^"\']+)\1/i';
+    // ИСПРАВЛЕНО: Регулярное выражение захватывает ПОЛНЫЙ тег <a>
+    $pattern = '/<a\s[^>]*href\s*=\s*["\'][^"\']+["\'][^>]*>/i';
     
     $content = preg_replace_callback( $pattern, function( $matches ) use ( $home_domain ) {
-        $url = $matches[2];
-        $link_domain = wp_parse_url( $url, PHP_URL_HOST );
+        $full_link = $matches[0];
         
-        // Проверяем, является ли ссылка внешней
-        if ( $link_domain && $link_domain !== $home_domain && strpos( $url, 'http' ) === 0 ) {
-            $full_link = $matches[0];
-            
-            // Проверяем, есть ли уже rel атрибут
-            if ( preg_match( '/rel=["\']([^"\']*)["\']/', $full_link ) ) {
-                // Добавляем nofollow к существующему rel
-                $full_link = preg_replace( '/rel=(["\'])([^"\']*)\1/', 'rel=$1$2 nofollow$1', $full_link );
-            } else {
-                // Добавляем новый rel атрибут
-                $full_link = preg_replace( '/href=/', 'rel="nofollow" href=', $full_link );
-            }
-            
+        // Извлекаем URL из href
+        if ( ! preg_match( '/href\s*=\s*["\']([^"\']+)["\']/', $full_link, $href_match ) ) {
             return $full_link;
         }
         
-        return $matches[0];
+        $url = $href_match[1];
+        $link_domain = wp_parse_url( $url, PHP_URL_HOST );
+        
+        // Проверяем, является ли ссылка внешней
+        if ( ! $link_domain || $link_domain === $home_domain || strpos( $url, 'http' ) !== 0 ) {
+            return $full_link;
+        }
+        
+        // ИСПРАВЛЕНО: Проверяем, нет ли уже nofollow
+        if ( preg_match( '/rel\s*=\s*["\']([^"\']*)["\']/', $full_link, $rel_match ) ) {
+            $existing_rel = $rel_match[1];
+            
+            // Если nofollow уже есть — ничего не делаем
+            if ( preg_match( '/\bnofollow\b/', $existing_rel ) ) {
+                return $full_link;
+            }
+            
+            // Добавляем nofollow к существующему rel
+            $new_rel = trim( $existing_rel . ' nofollow' );
+            $full_link = preg_replace( 
+                '/rel\s*=\s*["\'][^"\']*["\']/', 
+                'rel="' . esc_attr( $new_rel ) . '"', 
+                $full_link 
+            );
+        } else {
+            // ИСПРАВЛЕНО: Добавляем rel перед закрывающей скобкой тега
+            $full_link = preg_replace( '/>$/', ' rel="nofollow">', $full_link );
+        }
+        
+        return $full_link;
     }, $content );
     
     return $content;
 }
 
-// Применяем фильтр к контенту постов и страниц
+// ============================================
+// ФИЛЬТРЫ ДЛЯ КОНТЕНТА
+// ============================================
+
+// Контент постов и страниц
 add_filter( 'the_content', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к контенту виджетов
+// Виджеты
 add_filter( 'widget_text_content', 'add_nofollow_to_external_links', 999 );
 add_filter( 'widget_text', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к выводу плагинов (общий фильтр)
+// Выдержки
 add_filter( 'the_excerpt', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к комментариям
+// Комментарии
 add_filter( 'comment_text', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к описанию категорий и тегов
+// Описания терминов
 add_filter( 'term_description', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к описанию автора
+// Описание автора
 add_filter( 'get_the_author_description', 'add_nofollow_to_external_links', 999 );
 
-// Применяем фильтр к пользовательским полям (meta)
-add_filter( 'the_meta', 'add_nofollow_to_external_links', 999 );
+// ============================================
+// ИСПРАВЛЕНО: Буферизация всего HTML-вывода
+// ============================================
 
-// Обработка ссылок в футере и других местах
-add_filter( 'wp_footer', function() {
-    ob_start();
-}, 0 );
+/**
+ * Запуск буферизации на раннем этапе
+ */
+function external_links_start_buffer() {
+    if ( ! is_admin() && ! wp_doing_ajax() && ! defined( 'REST_REQUEST' ) ) {
+        ob_start();
+    }
+}
+add_action( 'template_redirect', 'external_links_start_buffer', 0 );
 
-add_filter( 'wp_footer', function() {
-    $content = ob_get_clean();
-    echo add_nofollow_to_external_links( $content );
-}, 999 );
+/**
+ * Обработка и вывод буфера
+ */
+function external_links_end_buffer() {
+    if ( ! is_admin() && ! wp_doing_ajax() && ! defined( 'REST_REQUEST' ) ) {
+        if ( ob_get_level() > 0 ) {
+            $content = ob_get_clean();
+            echo add_nofollow_to_external_links( $content );
+        }
+    }
+}
+add_action( 'shutdown', 'external_links_end_buffer', 0 );
 
-// Обработка ссылок в хедере
-add_filter( 'wp_head', function() {
-    ob_start();
-}, 0 );
+// ============================================
+// ПОДДЕРЖКА ПОПУЛЯРНЫХ ПЛАГИНОВ
+// ============================================
 
-add_filter( 'wp_head', function() {
-    $content = ob_get_clean();
-    echo add_nofollow_to_external_links( $content );
-}, 999 );
-
-// Специальная обработка для популярных плагинов
 // WooCommerce
 add_filter( 'woocommerce_product_description', 'add_nofollow_to_external_links', 999 );
 add_filter( 'woocommerce_short_description', 'add_nofollow_to_external_links', 999 );
 
-// ACF (Advanced Custom Fields)
-add_filter( 'acf/format_value', function( $value, $post_id, $field ) {
-    if ( is_string( $value ) ) {
-        return add_nofollow_to_external_links( $value );
-    }
-    return $value;
-}, 999, 3 );
+// ACF (Advanced Custom Fields) — с проверкой существования
+if ( class_exists( 'ACF' ) ) {
+    add_filter( 'acf/format_value', function( $value, $post_id, $field ) {
+        if ( is_string( $value ) ) {
+            return add_nofollow_to_external_links( $value );
+        }
+        return $value;
+    }, 999, 3 );
+}
 
 // Elementor
 add_filter( 'elementor/frontend/the_content', 'add_nofollow_to_external_links', 999 );
 
 // Beaver Builder
-add_filter( 'fl_builder_render', 'add_nofollow_to_external_links', 999 );
+add_filter( 'fl_builder_render_content', 'add_nofollow_to_external_links', 999 );
 
 // Divi
 add_filter( 'et_pb_get_processed_content', 'add_nofollow_to_external_links', 999 );
@@ -112,13 +157,38 @@ add_filter( 'render_block', function( $block_content, $block ) {
     return add_nofollow_to_external_links( $block_content );
 }, 999, 2 );
 
-// Обработка всего HTML вывода (последняя линия защиты)
-add_action( 'wp_footer', function() {
-    if ( ! is_admin() ) {
-        ob_start( 'add_nofollow_to_external_links' );
-    }
-}, 0 );
+// ============================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================
 
-// Дополнительная функция для обработки ссылок в кастомных полях
+/**
+ * Обработка ссылок в кастомных полях ACF
+ * ИСПРАВЛЕНО: Добавлена проверка существования функции
+ * 
+ * @param string $field_name Имя поля
+ * @param int|null $post_id ID поста
+ * @return mixed Обработанное значение
+ */
 function get_external_nofollow_field( $field_name, $post_id = null ) {
+    if ( ! function_exists( 'get_field' ) ) {
+        return '';
+    }
+    
     $value = get_field( $field_name, $post_id );
+    
+    if ( ! is_string( $value ) ) {
+        return $value;
+    }
+    
+    return add_nofollow_to_external_links( $value );
+}
+
+/**
+ * Функция для ручной обработки контента
+ * 
+ * @param mixed $content Контент для обработки
+ * @return mixed Обработанный контент
+ */
+function process_external_links( $content ) {
+    return add_nofollow_to_external_links( $content );
+}
