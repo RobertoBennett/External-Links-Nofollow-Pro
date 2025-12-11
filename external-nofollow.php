@@ -4,7 +4,7 @@
  * Description: Автоматически добавляет rel="nofollow" ко всем внешним ссылкам
  * Version: 2.0
  */
-
+ 
 // Предотвращаем прямой доступ
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
