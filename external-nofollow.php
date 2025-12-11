@@ -2,7 +2,7 @@
 /**
  * Plugin Name: External Links Nofollow Pro
  * Description: Автоматически добавляет rel="nofollow" ко всем внешним ссылкам на сайте
- * Version: 3.0
+ * Version: 3.1
  * Author: WordPress Developer
  * License: GPL v2 or later
  * Text Domain: external-links-nofollow
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
 // ============================================
 
-define( 'EXTERNAL_NOFOLLOW_VERSION', '3.0' );
+define( 'EXTERNAL_NOFOLLOW_VERSION', '3.1' );
 define( 'EXTERNAL_NOFOLLOW_DEBUG', defined( 'WP_DEBUG' ) && WP_DEBUG );
 
 // ============================================
@@ -136,42 +136,6 @@ function external_links_is_external( $url, $home_domain ) {
 }
 
 /**
- * Проверяет, нужно ли обрабатывать текущую страницу
- * 
- * @return bool True если нужно обрабатывать
- */
-function external_links_should_process() {
-    // Исключаем админ-панель
-    if ( is_admin() ) {
-        return false;
-    }
-    
-    // Исключаем AJAX запросы
-    if ( wp_doing_ajax() ) {
-        return false;
-    }
-    
-    // Исключаем REST API
-    if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
-        return false;
-    }
-    
-    // Исключаем определенные страницы (фильтр для кастомизации)
-    $excluded_ids = apply_filters( 'external_nofollow_excluded_ids', array() );
-    if ( is_singular() && in_array( get_the_ID(), $excluded_ids, true ) ) {
-        return false;
-    }
-    
-    // Исключаем определенные типы постов
-    $excluded_post_types = apply_filters( 'external_nofollow_excluded_post_types', array() );
-    if ( is_singular() && in_array( get_post_type(), $excluded_post_types, true ) ) {
-        return false;
-    }
-    
-    return true;
-}
-
-/**
  * Логирование информации (только в режиме отладки)
  * 
  * @param string $message Сообщение для логирования
@@ -198,7 +162,7 @@ function external_links_log_error( $message ) {
 }
 
 // ============================================
-// ФИЛЬТРЫ ДЛЯ КОНТЕНТА
+// ФИЛЬТРЫ ДЛЯ КОНТЕНТА (БЕЗ БУФЕРИЗАЦИИ)
 // ============================================
 
 // Контент постов и страниц
@@ -219,46 +183,6 @@ add_filter( 'term_description', 'add_nofollow_to_external_links', 999 );
 
 // Описание автора
 add_filter( 'get_the_author_description', 'add_nofollow_to_external_links', 999 );
-
-// ============================================
-// БУФЕРИЗАЦИЯ ВСЕГО HTML-ВЫВОДА
-// ============================================
-
-/**
- * Запуск буферизации на раннем этапе
- */
-function external_links_start_buffer() {
-    if ( ! external_links_should_process() ) {
-        return;
-    }
-    
-    // Проверяем, не запущена ли уже буферизация
-    if ( ob_get_level() === 0 ) {
-        ob_start();
-        external_links_log( 'Buffer started' );
-    }
-}
-add_action( 'template_redirect', 'external_links_start_buffer', 0 );
-
-/**
- * Обработка и вывод буфера
- */
-function external_links_end_buffer() {
-    if ( ! external_links_should_process() ) {
-        return;
-    }
-    
-    if ( ob_get_level() > 0 ) {
-        $content = ob_get_clean();
-        
-        // Обрабатываем контент
-        $processed_content = add_nofollow_to_external_links( $content );
-        
-        echo $processed_content;
-        external_links_log( 'Buffer processed and flushed' );
-    }
-}
-add_action( 'shutdown', 'external_links_end_buffer', 0 );
 
 // ============================================
 // ПОДДЕРЖКА ПОПУЛЯРНЫХ ПЛАГИНОВ
@@ -350,43 +274,6 @@ function process_external_links( $content ) {
 function external_links_nofollow_get_version() {
     return EXTERNAL_NOFOLLOW_VERSION;
 }
-
-// ============================================
-// ХУКИ ДЛЯ КАСТОМИЗАЦИИ
-// ============================================
-
-/**
- * Фильтр для исключения определенных доменов
- * 
- * Пример использования:
- * add_filter( 'external_nofollow_excluded_domains', function( $domains ) {
- *     $domains[] = 'example.com';
- *     return $domains;
- * });
- */
-apply_filters( 'external_nofollow_excluded_domains', array() );
-
-/**
- * Фильтр для исключения определенных страниц
- * 
- * Пример использования:
- * add_filter( 'external_nofollow_excluded_ids', function( $ids ) {
- *     $ids[] = 123; // ID страницы
- *     return $ids;
- * });
- */
-apply_filters( 'external_nofollow_excluded_ids', array() );
-
-/**
- * Фильтр для исключения определенных типов постов
- * 
- * Пример использования:
- * add_filter( 'external_nofollow_excluded_post_types', function( $types ) {
- *     $types[] = 'page';
- *     return $types;
- * });
- */
-apply_filters( 'external_nofollow_excluded_post_types', array() );
 
 // ============================================
 // ИНИЦИАЛИЗАЦИЯ ПЛАГИНА
