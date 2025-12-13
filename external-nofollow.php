@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Universal Nofollow Pro
- * Description: Добавляет rel="nofollow" ко всем внешним ссылкам, включая Яндекс Маркет, с админ-панелью
- * Version: 3.5
+ * Description: Добавляет rel="nofollow" ко всем внешним ссылкам с админ-панелью и управлением списками
+ * Version: 4.0
  * Author: WordPress Developer
  * License: GPL v2 or later
  * Text Domain: universal-nofollow
@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
 // ============================================
 
-define( 'UNIVERSAL_NOFOLLOW_VERSION', '3.5' );
+define( 'UNIVERSAL_NOFOLLOW_VERSION', '4.0' );
 define( 'UNIVERSAL_NOFOLLOW_DEBUG', defined( 'WP_DEBUG' ) && WP_DEBUG );
 define( 'UNIVERSAL_NOFOLLOW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'UNIVERSAL_NOFOLLOW_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -375,6 +375,12 @@ function universal_add_nofollow_to_links( $content ) {
             return $full_link;
         }
         
+        // Проверяем, в списке ли ссылка для блокировки
+        if ( universal_is_link_in_blocklist( $url ) ) {
+            universal_log( 'Found link in blocklist: ' . $url );
+            return universal_add_nofollow_to_link( $full_link );
+        }
+        
         // Проверяем, исключена ли ссылка
         if ( universal_is_link_excluded( $url ) ) {
             universal_increment_stat( 'excluded' );
@@ -396,30 +402,7 @@ function universal_add_nofollow_to_links( $content ) {
         
         universal_log( 'Found external link: ' . $url );
         
-        // Проверяем, есть ли уже rel атрибут
-        if ( preg_match( '/rel\s*=\s*["\']([^"\']*)["\']/', $full_link, $rel_match ) ) {
-            $existing_rel = $rel_match[1];
-            
-            // Если nofollow уже есть — ничего не делаем
-            if ( preg_match( '/\bnofollow\b/i', $existing_rel ) ) {
-                return $full_link;
-            }
-            
-            // Добавляем nofollow к существующему rel
-            $new_rel = trim( $existing_rel . ' nofollow' );
-            $full_link = preg_replace( 
-                '/rel\s*=\s*["\'][^"\']*["\']/', 
-                'rel="' . esc_attr( $new_rel ) . '"', 
-                $full_link 
-            );
-        } else {
-            // Добавляем новый rel атрибут перед закрывающей скобкой тега
-            $full_link = preg_replace( '/>$/', ' rel="nofollow">', $full_link );
-        }
-        
-        universal_log( 'Added nofollow to external link: ' . $url );
-        universal_increment_stat( 'added' );
-        return $full_link;
+        return universal_add_nofollow_to_link( $full_link );
     }, $content );
     
     // Проверяем на ошибки регулярных выражений
@@ -430,6 +413,40 @@ function universal_add_nofollow_to_links( $content ) {
     }
     
     return $content;
+}
+
+/**
+ * Добавляет rel="nofollow" к одной ссылке
+ * 
+ * @param string $full_link Полный HTML тег ссылки
+ * @return string Обновленный тег ссылки
+ */
+function universal_add_nofollow_to_link( $full_link ) {
+    // Проверяем, есть ли уже rel атрибут
+    if ( preg_match( '/rel\s*=\s*["\']([^"\']*)["\']/', $full_link, $rel_match ) ) {
+        $existing_rel = $rel_match[1];
+        
+        // Если nofollow уже есть — ничего не делаем
+        if ( preg_match( '/\bnofollow\b/i', $existing_rel ) ) {
+            return $full_link;
+        }
+        
+        // Добавляем nofollow к существующему rel
+        $new_rel = trim( $existing_rel . ' nofollow' );
+        $full_link = preg_replace( 
+            '/rel\s*=\s*["\'][^"\']*["\']/', 
+            'rel="' . esc_attr( $new_rel ) . '"', 
+            $full_link 
+        );
+    } else {
+        // Добавляем новый rel атрибут перед закрывающей скобкой тега
+        $full_link = preg_replace( '/>$/', ' rel="nofollow">', $full_link );
+    }
+    
+    universal_log( 'Added nofollow to external link' );
+    universal_increment_stat( 'added' );
+    
+    return $full_link;
 }
 
 // ============================================
@@ -568,6 +585,50 @@ function universal_is_link_excluded( $url ) {
         // Частичное совпадение
         if ( strpos( $url, $excluded ) !== false ) {
             universal_log( 'Link excluded (partial match): ' . $url );
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+/**
+ * Получает список ссылок для блокировки
+ * 
+ * @return array Массив ссылок для блокировки
+ */
+function universal_get_blocklist_links() {
+    $raw = get_option( 'universal_nofollow_blocklist_links', '' );
+    if ( empty( $raw ) ) {
+        return array();
+    }
+    
+    // Разбиваем по строкам и очищаем
+    $links = array_map( 'trim', explode( "\n", $raw ) );
+    $links = array_filter( $links );
+    
+    return $links;
+}
+
+/**
+ * Проверяет, в списке ли ссылка для блокировки
+ * 
+ * @param string $url URL для проверки
+ * @return bool True если в списке
+ */
+function universal_is_link_in_blocklist( $url ) {
+    $blocklist = universal_get_blocklist_links();
+    
+    foreach ( $blocklist as $blocked ) {
+        // Полное совпадение
+        if ( $url === $blocked ) {
+            universal_log( 'Link found in blocklist (full match): ' . $url );
+            return true;
+        }
+        
+        // Частичное совпадение
+        if ( strpos( $url, $blocked ) !== false ) {
+            universal_log( 'Link found in blocklist (partial match): ' . $url );
             return true;
         }
     }
@@ -739,10 +800,10 @@ function universal_nofollow_settings_page() {
         echo '<div class="notice notice-success"><p>✓ Настройки сохранены успешно!</p></div>';
     }
     
-    // Обрабатываем загрузку CSV
+    // Обрабатываем загрузку CSV для исключений
     if ( isset( $_POST['universal_nofollow_csv_nonce'] ) && wp_verify_nonce( $_POST['universal_nofollow_csv_nonce'], 'universal_nofollow_csv' ) ) {
         if ( ! empty( $_FILES['csv_file'] ) ) {
-            $result = universal_import_csv( $_FILES['csv_file'] );
+            $result = universal_import_csv( $_FILES['csv_file'], 'excluded' );
             if ( $result['success'] ) {
                 echo '<div class="notice notice-success"><p>✓ ' . esc_html( $result['message'] ) . '</p></div>';
             } else {
@@ -751,9 +812,27 @@ function universal_nofollow_settings_page() {
         }
     }
     
-    // Обрабатываем экспорт CSV
+    // Обрабатываем загрузку CSV для блокировки
+    if ( isset( $_POST['universal_nofollow_blocklist_csv_nonce'] ) && wp_verify_nonce( $_POST['universal_nofollow_blocklist_csv_nonce'], 'universal_nofollow_blocklist_csv' ) ) {
+        if ( ! empty( $_FILES['blocklist_csv_file'] ) ) {
+            $result = universal_import_csv( $_FILES['blocklist_csv_file'], 'blocklist' );
+            if ( $result['success'] ) {
+                echo '<div class="notice notice-success"><p>✓ ' . esc_html( $result['message'] ) . '</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>✗ ' . esc_html( $result['message'] ) . '</p></div>';
+            }
+        }
+    }
+    
+    // Обрабатываем экспорт CSV для исключений
     if ( isset( $_GET['action'] ) && $_GET['action'] === 'export_csv' && isset( $_GET['_wpnonce'] ) && wp_verify_nonce( $_GET['_wpnonce'], 'universal_nofollow_export' ) ) {
-        universal_export_csv();
+        universal_export_csv( 'excluded' );
+        exit;
+    }
+    
+    // Обрабатываем экспорт CSV для блокировки
+    if ( isset( $_GET['action'] ) && $_GET['action'] === 'export_blocklist_csv' && isset( $_GET['_wpnonce'] ) && wp_verify_nonce( $_GET['_wpnonce'], 'universal_nofollow_export_blocklist' ) ) {
+        universal_export_csv( 'blocklist' );
         exit;
     }
     
@@ -781,6 +860,10 @@ function universal_nofollow_settings_page() {
     // Получаем статистику
     $stats = universal_get_stats();
     
+    // Получаем списки ссылок
+    $excluded_list = universal_get_excluded_links();
+    $blocklist = universal_get_blocklist_links();
+    
     ?>
     <div class="wrap">
         <h1>🔗 Universal Nofollow Pro</h1>
@@ -789,6 +872,7 @@ function universal_nofollow_settings_page() {
         <h2 class="nav-tab-wrapper">
             <a href="#" class="nav-tab universal-tab nav-tab-active" data-target="universal-panel-general">⚙️ Основные настройки</a>
             <a href="#" class="nav-tab universal-tab" data-target="universal-panel-exclusions">🚫 Исключения</a>
+            <a href="#" class="nav-tab universal-tab" data-target="universal-panel-blocklist">✅ Список блокировки</a>
             <a href="#" class="nav-tab universal-tab" data-target="universal-panel-stats">📊 Статистика</a>
         </h2>
         
@@ -909,7 +993,7 @@ function universal_nofollow_settings_page() {
         
         <!-- ====================== ИСКЛЮЧЕНИЯ (CSV) ====================== -->
         <div id="universal-panel-exclusions" class="universal-panel" style="display: none;">
-            <h2>🔗 Управление исключёнными ссылками</h2>
+            <h2>🚫 Управление исключёнными ссылками</h2>
             
             <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
                 <h3>📥 Загрузить CSV файл</h3>
@@ -925,10 +1009,10 @@ function universal_nofollow_settings_page() {
             </div>
             
             <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
-                <h3>📥 Текущие исключения</h3>
-                <p>Всего исключений: <strong><?php echo count( universal_get_excluded_links() ); ?></strong></p>
+                <h3>📋 Текущие исключения</h3>
+                <p>Всего исключений: <strong><?php echo count( $excluded_list ); ?></strong></p>
                 
-                <?php if ( ! empty( universal_get_excluded_links() ) ) : ?>
+                <?php if ( ! empty( $excluded_list ) ) : ?>
                     <table class="widefat striped">
                         <thead>
                             <tr>
@@ -936,7 +1020,7 @@ function universal_nofollow_settings_page() {
                             </tr>
                         </thead>
                         <tbody>
-                            <?php foreach ( universal_get_excluded_links() as $link ) : ?>
+                            <?php foreach ( $excluded_list as $link ) : ?>
                                 <tr>
                                     <td><?php echo esc_html( $link ); ?></td>
                                 </tr>
@@ -952,6 +1036,92 @@ function universal_nofollow_settings_page() {
                 <h3>📤 Экспортировать CSV</h3>
                 <p>
                     <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'action' => 'export_csv' ), admin_url( 'options-general.php?page=universal-nofollow-settings' ) ), 'universal_nofollow_export' ) ); ?>" class="button button-secondary">
+                        Скачать CSV
+                    </a>
+                </p>
+            </div>
+        </div>
+        
+        <!-- ====================== СПИСОК БЛОКИРОВКИ (CSV) ====================== -->
+        <div id="universal-panel-blocklist" class="universal-panel" style="display: none;">
+            <h2>✅ Управление списком блокировки ссылок</h2>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <h3>📥 Загрузить CSV файл</h3>
+                <form method="post" enctype="multipart/form-data">
+                    <?php wp_nonce_field( 'universal_nofollow_blocklist_csv', 'universal_nofollow_blocklist_csv_nonce' ); ?>
+                    <input type="file" name="blocklist_csv_file" accept=".csv" required />
+                    <?php submit_button( 'Загрузить', 'secondary', 'submit', false ); ?>
+                    <p class="description">
+                        Загрузите CSV файл со ссылками для блокировки (одна ссылка на строку).<br>
+                        <strong>Формат:</strong> Первая колонка должна содержать URL.<br>
+                        <strong>Примечание:</strong> Ссылки из этого списка будут получать rel="nofollow" независимо от других настроек.
+                    </p>
+                </form>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <h3>🖊️ Добавить новую ссылку</h3>
+                <form method="post">
+                    <?php wp_nonce_field( 'universal_nofollow_add_blocklist', 'universal_nofollow_add_blocklist_nonce' ); ?>
+                    <input type="text" name="new_blocklist_link" placeholder="https://example.com/..." style="width: 60%;" required />
+                    <?php submit_button( 'Добавить', 'secondary', 'add_blocklist', false ); ?>
+                </form>
+                
+                <?php
+                // Обработка добавления новой ссылки в список блокировки
+                if ( isset( $_POST['add_blocklist'] )
+                    && isset( $_POST['new_blocklist_link'] )
+                    && wp_verify_nonce( $_POST['universal_nofollow_add_blocklist_nonce'], 'universal_nofollow_add_blocklist' )
+                ) {
+                    $new = trim( sanitize_text_field( $_POST['new_blocklist_link'] ) );
+                    if ( $new ) {
+                        $raw = get_option( 'universal_nofollow_blocklist_links', '' );
+                        $lines = array_filter( array_map( 'trim', explode( "\n", $raw ) ) );
+                        if ( ! in_array( $new, $lines, true ) ) {
+                            $lines[] = $new;
+                            update_option( 'universal_nofollow_blocklist_links', implode( "\n", $lines ) );
+                            echo '<div class="notice notice-success"><p>✅ Ссылка добавлена в список блокировки.</p></div>';
+                            // Обновляем список
+                            $blocklist = universal_get_blocklist_links();
+                        }
+                    }
+                }
+                ?>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <h3>📋 Текущий список блокировки</h3>
+                <p>Всего ссылок в списке: <strong><?php echo count( $blocklist ); ?></strong></p>
+                
+                <?php if ( ! empty( $blocklist ) ) : ?>
+                    <table class="widefat striped">
+                        <thead>
+                            <tr>
+                                <th>URL для блокировки</th>
+                                <th style="width: 100px;">Действие</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ( $blocklist as $link ) : ?>
+                                <tr>
+                                    <td><?php echo esc_html( $link ); ?></td>
+                                    <td>
+                                        <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'page' => 'universal-nofollow-settings', 'action' => 'delete_blocklist', 'blocklist_link' => base64_encode( $link ) ), admin_url( 'options-general.php' ) ), 'universal_nofollow_delete_blocklist' ) ); ?>" class="button button-small button-link-delete">Удалить</a>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else : ?>
+                    <p style="color: #999;">Список блокировки пуст</p>
+                <?php endif; ?>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px;">
+                <h3>📤 Экспортировать CSV</h3>
+                <p>
+                    <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'action' => 'export_blocklist_csv' ), admin_url( 'options-general.php?page=universal-nofollow-settings' ) ), 'universal_nofollow_export_blocklist' ) ); ?>" class="button button-secondary">
                         Скачать CSV
                     </a>
                 </p>
@@ -1004,6 +1174,7 @@ function universal_nofollow_settings_page() {
             <h3>✅ Что обрабатывает плагин:</h3>
             <ul style="list-style: none; padding-left: 0;">
                 <li>✓ <strong>Все внешние ссылки</strong> (по умолчанию)</li>
+                <li>✓ <strong>Ссылки из списка блокировки</strong> (приоритет выше)</li>
                 <li>✓ <strong>Яндекс Маркет</strong> (market.yandex.ru) — можно исключить</li>
                 <li>✓ <strong>Яндекс Реклама</strong> (yandex.ru/clck) — всегда исключается</li>
                 <li>✓ <strong>Социальные сети</strong> (если включено)</li>
@@ -1025,10 +1196,10 @@ function universal_nofollow_settings_page() {
             <h3>🎯 Особенности:</h3>
             <ul style="list-style: none; padding-left: 0;">
                 <li>✓ <strong>Без буферизации</strong> — не конфликтует с другими плагинами</li>
-                <li>✓ <strong>Умные исключения</strong> — полные и частичные совпадения</li>
+                <li>✓ <strong>Два списка управления</strong> — исключения и блокировка</li>
+                <li>✓ <strong>CSV импорт/экспорт</strong> — для обоих списков</li>
                 <li>✓ <strong>Гео-таргетинг</strong> — исключение по странам с кешированием</li>
                 <li>✓ <strong>REST API</strong> — stats & blocked-countries</li>
-                <li>✓ <strong>CSV импорт/экспорт</strong> — управление исключениями</li>
                 <li>✓ <strong>Интеграция с SEO-плагинами</strong></li>
                 <li>✓ <strong>Логирование</strong> — для отладки в режиме WP_DEBUG</li>
                 <li>✓ <strong>Производительность</strong> — кеширование и оптимизация</li>
@@ -1056,6 +1227,21 @@ function universal_nofollow_settings_page() {
     });
     </script>
     <?php
+    
+    // Обработка удаления ссылки из списка блокировки
+    if ( isset( $_GET['action'] ) && $_GET['action'] === 'delete_blocklist'
+        && isset( $_GET['_wpnonce'] )
+        && wp_verify_nonce( $_GET['_wpnonce'], 'universal_nofollow_delete_blocklist' )
+        && isset( $_GET['blocklist_link'] )
+    ) {
+        $link_to_delete = base64_decode( $_GET['blocklist_link'] );
+        $raw = get_option( 'universal_nofollow_blocklist_links', '' );
+        $lines = array_filter( array_map( 'trim', explode( "\n", $raw ) ) );
+        $lines = array_filter( $lines, function( $l ) use ( $link_to_delete ) {
+            return $l !== $link_to_delete;
+        } );
+        update_option( 'universal_nofollow_blocklist_links', implode( "\n", $lines ) );
+    }
 }
 
 // ============================================
@@ -1063,12 +1249,13 @@ function universal_nofollow_settings_page() {
 // ============================================
 
 /**
- * Импортирует исключения из CSV файла
+ * Импортирует ссылки из CSV файла
  * 
  * @param array $file Информация о загруженном файле
+ * @param string $type Тип списка ('excluded' или 'blocklist')
  * @return array Результат импорта
  */
-function universal_import_csv( $file ) {
+function universal_import_csv( $file, $type = 'excluded' ) {
     // Проверяем тип файла
     if ( $file['type'] !== 'text/csv' && $file['type'] !== 'application/vnd.ms-excel' ) {
         return array(
@@ -1109,36 +1296,48 @@ function universal_import_csv( $file ) {
     
     fclose( $handle );
     
+    // Определяем опцию в зависимости от типа
+    $option_key = ( $type === 'blocklist' ) ? 'universal_nofollow_blocklist_links' : 'universal_nofollow_excluded_links';
+    
     // Получаем существующие ссылки
-    $existing = universal_get_excluded_links();
+    $existing = ( $type === 'blocklist' ) ? universal_get_blocklist_links() : universal_get_excluded_links();
     
     // Объединяем и удаляем дубликаты
     $all_links = array_unique( array_merge( $existing, $links ) );
     
     // Сохраняем
-    update_option( 'universal_nofollow_excluded_links', implode( "\n", $all_links ) );
+    update_option( $option_key, implode( "\n", $all_links ) );
+    
+    $type_name = ( $type === 'blocklist' ) ? 'блокировки' : 'исключений';
     
     return array(
         'success' => true,
-        'message' => 'Загружено ' . $count . ' новых исключений. Всего: ' . count( $all_links ),
+        'message' => 'Загружено ' . $count . ' новых ' . $type_name . '. Всего: ' . count( $all_links ),
     );
 }
 
 /**
- * Экспортирует исключения в CSV файл
+ * Экспортирует ссылки в CSV файл
+ * 
+ * @param string $type Тип списка ('excluded' или 'blocklist')
  */
-function universal_export_csv() {
-    $links = universal_get_excluded_links();
+function universal_export_csv( $type = 'excluded' ) {
+    // Получаем ссылки в зависимости от типа
+    $links = ( $type === 'blocklist' ) ? universal_get_blocklist_links() : universal_get_excluded_links();
+    
+    // Определяем имя файла
+    $filename = ( $type === 'blocklist' ) ? 'blocklist-links-' : 'excluded-links-';
     
     // Устанавливаем заголовки
     header( 'Content-Type: text/csv; charset=utf-8' );
-    header( 'Content-Disposition: attachment; filename="excluded-links-' . date( 'Y-m-d' ) . '.csv"' );
+    header( 'Content-Disposition: attachment; filename="' . $filename . date( 'Y-m-d' ) . '.csv"' );
     
     // Открываем вывод
     $output = fopen( 'php://output', 'w' );
     
     // Пишем заголовок
-    fputcsv( $output, array( 'Исключённый URL' ) );
+    $header = ( $type === 'blocklist' ) ? 'URL для блокировки' : 'Исключённый URL';
+    fputcsv( $output, array( $header ) );
     
     // Пишем ссылки
     foreach ( $links as $link ) {
@@ -1196,6 +1395,17 @@ function universal_register_rest_routes() {
         'methods'             => WP_REST_Server::READABLE,
         'callback'            => function() {
             return rest_ensure_response( universal_get_excluded_links() );
+        },
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
+    ) );
+    
+    // Маршрут для получения списка блокировки
+    register_rest_route( 'universal-nofollow/v1', '/blocklist-links', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => function() {
+            return rest_ensure_response( universal_get_blocklist_links() );
         },
         'permission_callback' => function() {
             return current_user_can( 'manage_options' );
@@ -1272,6 +1482,11 @@ function universal_nofollow_activate() {
         add_option( 'universal_nofollow_excluded_links', '' );
     }
     
+    // Инициализируем список блокировки
+    if ( false === get_option( 'universal_nofollow_blocklist_links' ) ) {
+        add_option( 'universal_nofollow_blocklist_links', '' );
+    }
+    
     // Инициализируем статистику
     if ( false === get_option( 'universal_nofollow_stats' ) ) {
         add_option( 'universal_nofollow_stats', array(
@@ -1306,6 +1521,7 @@ function universal_nofollow_uninstall() {
     // Удаляем все опции и кеши
     delete_option( 'universal_nofollow_settings' );
     delete_option( 'universal_nofollow_excluded_links' );
+    delete_option( 'universal_nofollow_blocklist_links' );
     delete_option( 'universal_nofollow_stats' );
     delete_transient( 'universal_nofollow_stats_cache' );
     delete_transient( 'universal_countries_list' );
