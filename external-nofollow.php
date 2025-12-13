@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Universal Nofollow Pro
  * Description: Добавляет rel="nofollow" ко всем внешним ссылкам, включая Яндекс Маркет, с админ-панелью
- * Version: 3.2
+ * Version: 3.5
  * Author: WordPress Developer
  * License: GPL v2 or later
  * Text Domain: universal-nofollow
@@ -18,10 +18,320 @@ if ( ! defined( 'ABSPATH' ) ) {
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
 // ============================================
 
-define( 'UNIVERSAL_NOFOLLOW_VERSION', '3.0' );
+define( 'UNIVERSAL_NOFOLLOW_VERSION', '3.5' );
 define( 'UNIVERSAL_NOFOLLOW_DEBUG', defined( 'WP_DEBUG' ) && WP_DEBUG );
 define( 'UNIVERSAL_NOFOLLOW_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'UNIVERSAL_NOFOLLOW_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+
+// ============================================
+// SEO-PLUGIN INTEGRATION
+// ============================================
+
+/**
+ * Интеграция с популярными SEO-плагинами
+ */
+function universal_seo_integration() {
+    // Yoast SEO
+    if ( defined( 'WPSEO_VERSION' ) ) {
+        add_filter( 'wpseo_external_links_output', '__return_false' );
+    }
+    // Rank Math
+    if ( defined( 'RANK_MATH_VERSION' ) ) {
+        add_filter( 'rank_math/frontend/external_links', '__return_false' );
+    }
+    // All in One SEO Pack
+    if ( defined( 'AIOSEOP_VERSION' ) ) {
+        add_filter( 'aioseo_external_links_output', '__return_false' );
+    }
+}
+add_action( 'plugins_loaded', 'universal_seo_integration' );
+
+// ============================================
+// STATISTICS HELPERS (с кешированием)
+// ============================================
+
+/**
+ * Буфер для статистики (обновляется один раз в конце)
+ */
+$GLOBALS['universal_nofollow_stats_buffer'] = array(
+    'processed'    => 0,
+    'added'        => 0,
+    'excluded'     => 0,
+    'geo_excluded' => 0,
+    'error'        => 0,
+);
+
+/**
+ * Увеличивает счетчик статистики (в буфере)
+ * 
+ * @param string $key Ключ счетчика
+ */
+function universal_increment_stat( $key ) {
+    if ( isset( $GLOBALS['universal_nofollow_stats_buffer'][ $key ] ) ) {
+        $GLOBALS['universal_nofollow_stats_buffer'][ $key ]++;
+    }
+}
+
+/**
+ * Получает статистику (с кешированием)
+ * 
+ * @return array Массив статистики
+ */
+function universal_get_stats() {
+    // Проверяем кеш (обновляется каждый час)
+    $cached = get_transient( 'universal_nofollow_stats_cache' );
+    if ( $cached !== false ) {
+        return $cached;
+    }
+    
+    $stats = get_option( 'universal_nofollow_stats', array(
+        'processed'    => 0,
+        'added'        => 0,
+        'excluded'     => 0,
+        'geo_excluded' => 0,
+        'error'        => 0,
+    ) );
+    
+    // Кешируем на 1 час
+    set_transient( 'universal_nofollow_stats_cache', $stats, HOUR_IN_SECONDS );
+    
+    return $stats;
+}
+
+/**
+ * Сохраняет статистику из буфера
+ */
+function universal_save_stats_buffer() {
+    $buffer = $GLOBALS['universal_nofollow_stats_buffer'];
+    
+    // Если буфер пуст — не обновляем
+    if ( array_sum( $buffer ) === 0 ) {
+        return;
+    }
+    
+    $stats = get_option( 'universal_nofollow_stats', array(
+        'processed'    => 0,
+        'added'        => 0,
+        'excluded'     => 0,
+        'geo_excluded' => 0,
+        'error'        => 0,
+    ) );
+    
+    // Добавляем значения из буфера
+    foreach ( $buffer as $key => $count ) {
+        $stats[ $key ] = ( $stats[ $key ] ?? 0 ) + $count;
+    }
+    
+    update_option( 'universal_nofollow_stats', $stats );
+    
+    // Очищаем кеш
+    delete_transient( 'universal_nofollow_stats_cache' );
+}
+
+// Сохраняем статистику при завершении страницы
+add_action( 'shutdown', 'universal_save_stats_buffer', 999 );
+
+// ============================================
+// GEO-TARGETING HELPERS (с кешированием)
+// ============================================
+
+/**
+ * Получает страну посетителя (с кешированием)
+ * 
+ * @return string|null Код страны (ISO-2) или null
+ */
+function universal_get_visitor_country() {
+    static $country = null;
+    if ( $country !== null ) {
+        return $country;
+    }
+    
+    // Получаем IP адрес
+    $ip = universal_get_client_ip();
+    if ( ! $ip ) {
+        return null;
+    }
+    
+    // Проверяем кеш (24 часа)
+    $cache_key = 'universal_visitor_country_' . md5( $ip );
+    $cached = get_transient( $cache_key );
+    if ( $cached !== false ) {
+        $country = $cached;
+        return $country;
+    }
+    
+    // Получаем страну через API
+    $response = wp_remote_get( 'https://ip-api.com/json/' . $ip, array(
+        'timeout'   => 2,
+        'sslverify' => false,
+    ) );
+    
+    if ( is_wp_error( $response ) ) {
+        universal_log_error( 'Failed to get country from IP API: ' . $response->get_error_message() );
+        return null;
+    }
+    
+    $data = json_decode( wp_remote_retrieve_body( $response ), true );
+    if ( ! is_array( $data ) || empty( $data['countryCode'] ) ) {
+        universal_log_error( 'Invalid response from IP API' );
+        return null;
+    }
+    
+    $country = strtoupper( $data['countryCode'] );
+    
+    // Кешируем на 24 часа
+    set_transient( $cache_key, $country, DAY_IN_SECONDS );
+    
+    universal_log( 'Country detected: ' . $country . ' for IP: ' . $ip );
+    
+    return $country;
+}
+
+/**
+ * Получает IP адрес клиента
+ * 
+ * @return string|null IP адрес или null
+ */
+function universal_get_client_ip() {
+    // Проверяем различные источники IP
+    if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) {
+        // Cloudflare
+        return sanitize_text_field( $_SERVER['HTTP_CF_CONNECTING_IP'] );
+    } elseif ( ! empty( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) {
+        // Proxy
+        $ips = explode( ',', sanitize_text_field( $_SERVER['HTTP_X_FORWARDED_FOR'] ) );
+        return trim( $ips[0] );
+    } elseif ( ! empty( $_SERVER['REMOTE_ADDR'] ) ) {
+        // Прямое подключение
+        return sanitize_text_field( $_SERVER['REMOTE_ADDR'] );
+    }
+    
+    return null;
+}
+
+/**
+ * Проверяет, исключена ли страна
+ * 
+ * @param string $url URL для проверки (не используется, но оставлен для совместимости)
+ * @return bool True если страна исключена
+ */
+function universal_is_geo_excluded( $url = '' ) {
+    $settings = get_option( 'universal_nofollow_settings', array() );
+    $blocked = isset( $settings['blocked_countries'] ) ? $settings['blocked_countries'] : array();
+    
+    if ( empty( $blocked ) ) {
+        return false;
+    }
+    
+    $visitor_country = universal_get_visitor_country();
+    if ( ! $visitor_country ) {
+        return false;
+    }
+    
+    return in_array( $visitor_country, $blocked, true );
+}
+
+// ============================================
+// СПИСОК СТРАН (автоматическое обновление)
+// ============================================
+
+/**
+ * Получает актуальный список стран ISO-2
+ * 
+ * @return array Массив стран (код => название)
+ */
+function universal_get_countries_list() {
+    // Проверяем кеш (обновляется раз в неделю)
+    $cached = get_transient( 'universal_countries_list' );
+    if ( $cached !== false ) {
+        return $cached;
+    }
+    
+    // Пытаемся получить список из API
+    $countries = universal_fetch_countries_from_api();
+    
+    // Если API не доступен, используем встроенный список
+    if ( empty( $countries ) ) {
+        $countries = universal_get_default_countries();
+    }
+    
+    // Кешируем на 7 дней
+    set_transient( 'universal_countries_list', $countries, 7 * DAY_IN_SECONDS );
+    
+    return $countries;
+}
+
+/**
+ * Получает список стран из открытого API
+ * 
+ * @return array Массив стран или пустой массив
+ */
+function universal_fetch_countries_from_api() {
+    $response = wp_remote_get( 'https://restcountries.com/v3.1/all', array(
+        'timeout'   => 5,
+        'sslverify' => false,
+    ) );
+    
+    if ( is_wp_error( $response ) ) {
+        universal_log_error( 'Failed to fetch countries from API: ' . $response->get_error_message() );
+        return array();
+    }
+    
+    $data = json_decode( wp_remote_retrieve_body( $response ), true );
+    if ( ! is_array( $data ) ) {
+        universal_log_error( 'Invalid response from countries API' );
+        return array();
+    }
+    
+    $countries = array();
+    foreach ( $data as $country ) {
+        if ( isset( $country['cca2'] ) && isset( $country['name']['common'] ) ) {
+            $countries[ $country['cca2'] ] = $country['name']['common'];
+        }
+    }
+    
+    // Сортируем по названию
+    asort( $countries );
+    
+    universal_log( 'Fetched ' . count( $countries ) . ' countries from API' );
+    
+    return $countries;
+}
+
+/**
+ * Встроенный список стран (на случай если API недоступен)
+ * 
+ * @return array Массив стран
+ */
+function universal_get_default_countries() {
+    return array(
+        'RU' => 'Россия',
+        'US' => 'США',
+        'GB' => 'Великобритания',
+        'DE' => 'Германия',
+        'FR' => 'Франция',
+        'IT' => 'Италия',
+        'ES' => 'Испания',
+        'CN' => 'Китай',
+        'JP' => 'Япония',
+        'IN' => 'Индия',
+        'BR' => 'Бразилия',
+        'CA' => 'Канада',
+        'AU' => 'Австралия',
+        'MX' => 'Мексика',
+        'KR' => 'Южная Корея',
+        'NL' => 'Нидерланды',
+        'SE' => 'Швеция',
+        'CH' => 'Швейцария',
+        'PL' => 'Польша',
+        'UA' => 'Украина',
+        'TR' => 'Турция',
+        'ZA' => 'ЮАР',
+        'SG' => 'Сингапур',
+        'HK' => 'Гонконг',
+        'NZ' => 'Новая Зеландия',
+    );
+}
 
 // ============================================
 // ОСНОВНАЯ ФУНКЦИЯ ОБРАБОТКИ ССЫЛОК
@@ -54,22 +364,33 @@ function universal_add_nofollow_to_links( $content ) {
     $pattern = '/<a\s+[^>]*?href\s*=\s*["\']([^"\']+)["\'][^>]*?>/i';
     
     $content = preg_replace_callback( $pattern, function( $matches ) use ( $home_domain ) {
+        universal_increment_stat( 'processed' );
+        
         $full_link = $matches[0];
         $url = $matches[1];
         
         // Проверяем, является ли ссылка внешней
         if ( ! universal_is_external( $url, $home_domain ) ) {
+            universal_increment_stat( 'excluded' );
             return $full_link;
         }
         
         // Проверяем, исключена ли ссылка
         if ( universal_is_link_excluded( $url ) ) {
+            universal_increment_stat( 'excluded' );
             return $full_link;
         }
         
         // Проверяем, это ли Яндекс реклама (исключаем из обработки)
         if ( universal_is_yandex_ads( $url ) ) {
+            universal_increment_stat( 'excluded' );
             universal_log( 'Yandex ads link excluded: ' . $url );
+            return $full_link;
+        }
+        
+        // Проверяем гео-таргетинг
+        if ( universal_is_geo_excluded( $url ) ) {
+            universal_increment_stat( 'geo_excluded' );
             return $full_link;
         }
         
@@ -97,12 +418,14 @@ function universal_add_nofollow_to_links( $content ) {
         }
         
         universal_log( 'Added nofollow to external link: ' . $url );
+        universal_increment_stat( 'added' );
         return $full_link;
     }, $content );
     
     // Проверяем на ошибки регулярных выражений
     if ( preg_last_error() !== PREG_NO_ERROR ) {
         universal_log_error( 'Regex error: ' . preg_last_error() );
+        universal_increment_stat( 'error' );
         return $content;
     }
     
@@ -119,7 +442,6 @@ function universal_add_nofollow_to_links( $content ) {
  * @return bool True если нужно обрабатывать
  */
 function universal_should_process_current_post_type() {
-    // Получаем настройки
     $settings = get_option( 'universal_nofollow_settings', array() );
     $enabled_post_types = isset( $settings['post_types'] ) ? $settings['post_types'] : array();
     
@@ -215,15 +537,13 @@ function universal_is_yandex_ads( $url ) {
  * @return array Массив исключенных ссылок
  */
 function universal_get_excluded_links() {
-    $settings = get_option( 'universal_nofollow_settings', array() );
-    $excluded = isset( $settings['excluded_links'] ) ? $settings['excluded_links'] : '';
-    
-    if ( empty( $excluded ) ) {
+    $raw = get_option( 'universal_nofollow_excluded_links', '' );
+    if ( empty( $raw ) ) {
         return array();
     }
     
     // Разбиваем по строкам и очищаем
-    $links = array_map( 'trim', explode( "\n", $excluded ) );
+    $links = array_map( 'trim', explode( "\n", $raw ) );
     $links = array_filter( $links );
     
     return $links;
@@ -253,16 +573,6 @@ function universal_is_link_excluded( $url ) {
     }
     
     return false;
-}
-
-/**
- * Проверяет, включена ли блокировка соцсетей
- * 
- * @return bool True если включена
- */
-function universal_is_social_blocking_enabled() {
-    $settings = get_option( 'universal_nofollow_settings', array() );
-    return isset( $settings['block_social'] ) && $settings['block_social'] === '1';
 }
 
 // ============================================
@@ -409,12 +719,49 @@ function universal_nofollow_settings_page() {
         
         // Сохраняем исключенные ссылки
         if ( isset( $_POST['excluded_links'] ) ) {
-            $settings['excluded_links'] = sanitize_textarea_field( $_POST['excluded_links'] );
+            $clean_links = sanitize_textarea_field( $_POST['excluded_links'] );
+            $settings['excluded_links'] = $clean_links;
+            update_option( 'universal_nofollow_excluded_links', $clean_links );
+        }
+        
+        // Сохраняем заблокированные страны (с проверкой)
+        if ( isset( $_POST['blocked_countries'] ) && is_array( $_POST['blocked_countries'] ) ) {
+            $settings['blocked_countries'] = array_map( 'sanitize_text_field', $_POST['blocked_countries'] );
+        } else {
+            $settings['blocked_countries'] = array();
         }
         
         update_option( 'universal_nofollow_settings', $settings );
         
+        // Очищаем кеш статистики
+        delete_transient( 'universal_nofollow_stats_cache' );
+        
         echo '<div class="notice notice-success"><p>✓ Настройки сохранены успешно!</p></div>';
+    }
+    
+    // Обрабатываем загрузку CSV
+    if ( isset( $_POST['universal_nofollow_csv_nonce'] ) && wp_verify_nonce( $_POST['universal_nofollow_csv_nonce'], 'universal_nofollow_csv' ) ) {
+        if ( ! empty( $_FILES['csv_file'] ) ) {
+            $result = universal_import_csv( $_FILES['csv_file'] );
+            if ( $result['success'] ) {
+                echo '<div class="notice notice-success"><p>✓ ' . esc_html( $result['message'] ) . '</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>✗ ' . esc_html( $result['message'] ) . '</p></div>';
+            }
+        }
+    }
+    
+    // Обрабатываем экспорт CSV
+    if ( isset( $_GET['action'] ) && $_GET['action'] === 'export_csv' && isset( $_GET['_wpnonce'] ) && wp_verify_nonce( $_GET['_wpnonce'], 'universal_nofollow_export' ) ) {
+        universal_export_csv();
+        exit;
+    }
+    
+    // Обрабатываем очистку статистики
+    if ( isset( $_POST['universal_nofollow_reset_stats_nonce'] ) && wp_verify_nonce( $_POST['universal_nofollow_reset_stats_nonce'], 'universal_nofollow_reset_stats' ) ) {
+        delete_option( 'universal_nofollow_stats' );
+        delete_transient( 'universal_nofollow_stats_cache' );
+        echo '<div class="notice notice-success"><p>✓ Статистика очищена!</p></div>';
     }
     
     // Получаем текущие настройки
@@ -422,112 +769,235 @@ function universal_nofollow_settings_page() {
     $enabled_post_types = isset( $settings['post_types'] ) ? $settings['post_types'] : array();
     $block_social = isset( $settings['block_social'] ) ? $settings['block_social'] : '0';
     $exclude_yandex_market = isset( $settings['exclude_yandex_market'] ) ? $settings['exclude_yandex_market'] : '0';
+    $blocked_countries = isset( $settings['blocked_countries'] ) ? $settings['blocked_countries'] : array();
     $excluded_links = isset( $settings['excluded_links'] ) ? $settings['excluded_links'] : '';
     
     // Получаем все типы записей
     $post_types = get_post_types( array( 'public' => true ), 'objects' );
+    
+    // Получаем список стран
+    $countries = universal_get_countries_list();
+    
+    // Получаем статистику
+    $stats = universal_get_stats();
     
     ?>
     <div class="wrap">
         <h1>🔗 Universal Nofollow Pro</h1>
         <p style="font-size: 14px; color: #666;">Версия <?php echo esc_html( UNIVERSAL_NOFOLLOW_VERSION ); ?> | Автоматическое добавление rel="nofollow" ко всем внешним ссылкам</p>
         
-        <form method="post" action="">
-            <?php wp_nonce_field( 'universal_nofollow_save', 'universal_nofollow_nonce' ); ?>
-            
-            <table class="form-table">
-                <!-- ТИПЫ ЗАПИСЕЙ -->
-                <tr>
-                    <th scope="row">
-                        <label for="post_types">📄 Типы записей для обработки:</label>
-                    </th>
-                    <td>
-                        <fieldset>
-                            <legend class="screen-reader-text">Типы записей</legend>
-                            
-                            <!-- Главная страница -->
-                            <label style="display: block; margin-bottom: 8px;">
-                                <input type="checkbox" name="post_types[]" value="home" 
-                                    <?php checked( in_array( 'home', $enabled_post_types, true ) ); ?> />
-                                <strong>Главная страница</strong>
-                            </label>
-                            
-                            <!-- Архивы -->
-                            <label style="display: block; margin-bottom: 8px;">
-                                <input type="checkbox" name="post_types[]" value="archive" 
-                                    <?php checked( in_array( 'archive', $enabled_post_types, true ) ); ?> />
-                                <strong>Архивы</strong> (категории, теги, авторы)
-                            </label>
-                            
-                            <!-- Типы записей -->
-                            <?php foreach ( $post_types as $post_type ) : ?>
+        <h2 class="nav-tab-wrapper">
+            <a href="#" class="nav-tab universal-tab nav-tab-active" data-target="universal-panel-general">⚙️ Основные настройки</a>
+            <a href="#" class="nav-tab universal-tab" data-target="universal-panel-exclusions">🚫 Исключения</a>
+            <a href="#" class="nav-tab universal-tab" data-target="universal-panel-stats">📊 Статистика</a>
+        </h2>
+        
+        <!-- ====================== ОСНОВНЫЕ НАСТРОЙКИ ====================== -->
+        <div id="universal-panel-general" class="universal-panel" style="display:block;">
+            <form method="post" action="">
+                <?php wp_nonce_field( 'universal_nofollow_save', 'universal_nofollow_nonce' ); ?>
+                
+                <table class="form-table">
+                    <!-- ТИПЫ ЗАПИСЕЙ -->
+                    <tr>
+                        <th scope="row">
+                            <label for="post_types">📄 Типы записей для обработки:</label>
+                        </th>
+                        <td>
+                            <fieldset>
+                                <legend class="screen-reader-text">Типы записей</legend>
+                                
                                 <label style="display: block; margin-bottom: 8px;">
-                                    <input type="checkbox" name="post_types[]" value="<?php echo esc_attr( $post_type->name ); ?>" 
-                                        <?php checked( in_array( $post_type->name, $enabled_post_types, true ) ); ?> />
-                                    <strong><?php echo esc_html( $post_type->label ); ?></strong>
+                                    <input type="checkbox" name="post_types[]" value="home" 
+                                        <?php checked( in_array( 'home', $enabled_post_types, true ) ); ?> />
+                                    <strong>Главная страница</strong>
                                 </label>
-                            <?php endforeach; ?>
-                            
-                            <p class="description">Выберите типы записей, на которых нужно блокировать индексацию ссылок. Если ничего не выбрано, плагин будет работать везде.</p>
-                        </fieldset>
-                    </td>
-                </tr>
+                                
+                                <label style="display: block; margin-bottom: 8px;">
+                                    <input type="checkbox" name="post_types[]" value="archive" 
+                                        <?php checked( in_array( 'archive', $enabled_post_types, true ) ); ?> />
+                                    <strong>Архивы</strong> (категории, теги, авторы)
+                                </label>
+                                
+                                <?php foreach ( $post_types as $post_type ) : ?>
+                                    <label style="display: block; margin-bottom: 8px;">
+                                        <input type="checkbox" name="post_types[]" value="<?php echo esc_attr( $post_type->name ); ?>" 
+                                            <?php checked( in_array( $post_type->name, $enabled_post_types, true ) ); ?> />
+                                        <strong><?php echo esc_html( $post_type->label ); ?></strong>
+                                    </label>
+                                <?php endforeach; ?>
+                                
+                                <p class="description">Выберите типы записей, на которых нужно блокировать индексацию ссылок. Если ничего не выбрано, плагин будет работать везде.</p>
+                            </fieldset>
+                        </td>
+                    </tr>
+                    
+                    <!-- БЛОКИРОВКА СОЦСЕТЕЙ -->
+                    <tr>
+                        <th scope="row">
+                            <label for="block_social">📱 Блокировка ссылок соцсетей:</label>
+                        </th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="block_social" value="1" 
+                                    <?php checked( $block_social, '1' ); ?> />
+                                Добавлять rel="nofollow" к ссылкам на социальные сети
+                            </label>
+                            <p class="description">Включите эту опцию, чтобы добавлять rel="nofollow" к ссылкам на Facebook, Twitter, Instagram, YouTube, TikTok и другие социальные сети.</p>
+                        </td>
+                    </tr>
+                    
+                    <!-- ИСКЛЮЧЕНИЕ ЯНДЕКС МАРКЕТА -->
+                    <tr>
+                        <th scope="row">
+                            <label for="exclude_yandex_market">🛍️ Исключить Яндекс Маркет:</label>
+                        </th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="exclude_yandex_market" value="1" 
+                                    <?php checked( $exclude_yandex_market, '1' ); ?> />
+                                Не добавлять rel="nofollow" к ссылкам Яндекс Маркета
+                            </label>
+                            <p class="description">По умолчанию плагин добавляет rel="nofollow" ко всем внешним ссылкам, включая Яндекс Маркет. Включите эту опцию, если хотите исключить ссылки market.yandex.ru из обработки.</p>
+                        </td>
+                    </tr>
+                    
+                    <!-- БЛОКИРОВКА ПО СТРАНАМ -->
+                    <tr>
+                        <th scope="row">
+                            <label for="blocked_countries">🌍 Блокировать страны:</label>
+                        </th>
+                        <td>
+                            <select name="blocked_countries[]" id="blocked_countries" multiple style="width: 100%; max-width: 400px; height: 200px;">
+                                <?php foreach ( $countries as $code => $name ) : ?>
+                                    <option value="<?php echo esc_attr( $code ); ?>" 
+                                        <?php selected( in_array( $code, $blocked_countries, true ) ); ?>>
+                                        <?php echo esc_html( $name . ' (' . $code . ')' ); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description">
+                                Выберите страны, для которых ссылки НЕ будут получать rel="nofollow".<br>
+                                (полезно, если ваш сервис ориентирован только на определённый регион)<br>
+                                <strong>Совет:</strong> Используйте Ctrl+Click для выбора нескольких стран.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- ИСКЛЮЧЕННЫЕ ССЫЛКИ -->
+                    <tr>
+                        <th scope="row">
+                            <label for="excluded_links">🚫 Исключенные ссылки:</label>
+                        </th>
+                        <td>
+                            <textarea name="excluded_links" id="excluded_links" rows="10" cols="50" class="large-text code"><?php echo esc_textarea( $excluded_links ); ?></textarea>
+                            <p class="description">
+                                Введите ссылки, которые нужно исключить из обработки. Одна ссылка на строку.<br />
+                                Поддерживается как полное совпадение, так и частичное (например, можно указать только домен).<br />
+                                <strong>Примеры:</strong><br />
+                                - Полное совпадение: <code>https://example.com/page</code><br />
+                                - Частичное совпадение: <code>example.com</code><br />
+                                - Только домен: <code>partner-site.ru</code>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
                 
-                <!-- БЛОКИРОВКА СОЦСЕТЕЙ -->
-                <tr>
-                    <th scope="row">
-                        <label for="block_social">📱 Блокировка ссылок соцсетей:</label>
-                    </th>
-                    <td>
-                        <label>
-                            <input type="checkbox" name="block_social" value="1" 
-                                <?php checked( $block_social, '1' ); ?> />
-                            Добавлять rel="nofollow" к ссылкам на социальные сети
-                        </label>
-                        <p class="description">Включите эту опцию, чтобы добавлять rel="nofollow" к ссылкам на Facebook, Twitter, Instagram, YouTube, TikTok и другие социальные сети.</p>
-                    </td>
-                </tr>
-                
-                <!-- ИСКЛЮЧЕНИЕ ЯНДЕКС МАРКЕТА -->
-                <tr>
-                    <th scope="row">
-                        <label for="exclude_yandex_market">🛍️ Исключить Яндекс Маркет:</label>
-                    </th>
-                    <td>
-                        <label>
-                            <input type="checkbox" name="exclude_yandex_market" value="1" 
-                                <?php checked( $exclude_yandex_market, '1' ); ?> />
-                            Не добавлять rel="nofollow" к ссылкам Яндекс Маркета
-                        </label>
-                        <p class="description">По умолчанию плагин добавляет rel="nofollow" ко всем внешним ссылкам, включая Яндекс Маркет. Включите эту опцию, если хотите исключить ссылки market.yandex.ru из обработки.</p>
-                    </td>
-                </tr>
-                
-                <!-- ИСКЛЮЧЕННЫЕ ССЫЛКИ -->
-                <tr>
-                    <th scope="row">
-                        <label for="excluded_links">🚫 Исключенные ссылки:</label>
-                    </th>
-                    <td>
-                        <textarea name="excluded_links" id="excluded_links" rows="10" cols="50" class="large-text code"><?php echo esc_textarea( $excluded_links ); ?></textarea>
-                        <p class="description">
-                            Введите ссылки, которые нужно исключить из обработки. Одна ссылка на строку.<br />
-                            Поддерживается как полное совпадение, так и частичное (например, можно указать только домен).<br />
-                            <strong>Примеры:</strong><br />
-                            - Полное совпадение: <code>https://example.com/page</code><br />
-                            - Частичное совпадение: <code>example.com</code><br />
-                            - Только домен: <code>partner-site.ru</code>
-                        </p>
-                    </td>
-                </tr>
-            </table>
+                <?php submit_button( 'Сохранить настройки', 'primary', 'submit', true ); ?>
+            </form>
+        </div>
+        
+        <!-- ====================== ИСКЛЮЧЕНИЯ (CSV) ====================== -->
+        <div id="universal-panel-exclusions" class="universal-panel" style="display: none;">
+            <h2>🔗 Управление исключёнными ссылками</h2>
             
-            <?php submit_button( 'Сохранить настройки', 'primary', 'submit', true ); ?>
-        </form>
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <h3>📥 Загрузить CSV файл</h3>
+                <form method="post" enctype="multipart/form-data">
+                    <?php wp_nonce_field( 'universal_nofollow_csv', 'universal_nofollow_csv_nonce' ); ?>
+                    <input type="file" name="csv_file" accept=".csv" required />
+                    <?php submit_button( 'Загрузить', 'secondary', 'submit', false ); ?>
+                    <p class="description">
+                        Загрузите CSV файл с исключенными ссылками (одна ссылка на строку).<br>
+                        <strong>Формат:</strong> Первая колонка должна содержать URL.
+                    </p>
+                </form>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <h3>📥 Текущие исключения</h3>
+                <p>Всего исключений: <strong><?php echo count( universal_get_excluded_links() ); ?></strong></p>
+                
+                <?php if ( ! empty( universal_get_excluded_links() ) ) : ?>
+                    <table class="widefat striped">
+                        <thead>
+                            <tr>
+                                <th>Исключённый URL / часть URL</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ( universal_get_excluded_links() as $link ) : ?>
+                                <tr>
+                                    <td><?php echo esc_html( $link ); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else : ?>
+                    <p style="color: #999;">Нет исключенных ссылок</p>
+                <?php endif; ?>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px;">
+                <h3>📤 Экспортировать CSV</h3>
+                <p>
+                    <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'action' => 'export_csv' ), admin_url( 'options-general.php?page=universal-nofollow-settings' ) ), 'universal_nofollow_export' ) ); ?>" class="button button-secondary">
+                        Скачать CSV
+                    </a>
+                </p>
+            </div>
+        </div>
+        
+        <!-- ====================== СТАТИСТИКА ====================== -->
+        <div id="universal-panel-stats" class="universal-panel" style="display: none;">
+            <h2>📊 Статистика обработки ссылок</h2>
+            
+            <div style="background: #f9f9f9; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+                <table class="widefat striped">
+                    <tbody>
+                        <tr>
+                            <td><strong>Обработано ссылок:</strong></td>
+                            <td><?php echo intval( $stats['processed'] ); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Добавлено rel="nofollow":</strong></td>
+                            <td><?php echo intval( $stats['added'] ); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Исключено (по списку):</strong></td>
+                            <td><?php echo intval( $stats['excluded'] ); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Исключено (по гео):</strong></td>
+                            <td><?php echo intval( $stats['geo_excluded'] ); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Ошибок регекс-парсинга:</strong></td>
+                            <td><?php echo intval( $stats['error'] ); ?></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <form method="post" action="">
+                <?php wp_nonce_field( 'universal_nofollow_reset_stats', 'universal_nofollow_reset_stats_nonce' ); ?>
+                <?php submit_button( 'Очистить статистику', 'delete', 'submit', true ); ?>
+            </form>
+        </div>
         
         <hr style="margin: 30px 0;" />
         
-        <!-- ИНФОРМАЦИЯ О ПЛАГИНЕ -->
+        <!-- ====================== ИНФОРМАЦИЯ О ПЛАГИНЕ ====================== -->
         <div style="background: #f5f5f5; padding: 20px; border-radius: 5px;">
             <h2>ℹ️ Информация о плагине</h2>
             
@@ -536,7 +1006,7 @@ function universal_nofollow_settings_page() {
                 <li>✓ <strong>Все внешние ссылки</strong> (по умолчанию)</li>
                 <li>✓ <strong>Яндекс Маркет</strong> (market.yandex.ru) — можно исключить</li>
                 <li>✓ <strong>Яндекс Реклама</strong> (yandex.ru/clck) — всегда исключается</li>
-                <li>✓ <strong>Социальные сети</strong> (Facebook, Twitter, Instagram, YouTube и т.д.) — если включено</li>
+                <li>✓ <strong>Социальные сети</strong> (если включено)</li>
                 <li>✓ <strong>Динамические ссылки</strong> в скриптах</li>
             </ul>
             
@@ -556,14 +1026,183 @@ function universal_nofollow_settings_page() {
             <ul style="list-style: none; padding-left: 0;">
                 <li>✓ <strong>Без буферизации</strong> — не конфликтует с другими плагинами</li>
                 <li>✓ <strong>Умные исключения</strong> — полные и частичные совпадения</li>
-                <li>✓ <strong>Гибкие настройки</strong> — выбор типов записей</li>
+                <li>✓ <strong>Гео-таргетинг</strong> — исключение по странам с кешированием</li>
+                <li>✓ <strong>REST API</strong> — stats & blocked-countries</li>
+                <li>✓ <strong>CSV импорт/экспорт</strong> — управление исключениями</li>
+                <li>✓ <strong>Интеграция с SEO-плагинами</strong></li>
                 <li>✓ <strong>Логирование</strong> — для отладки в режиме WP_DEBUG</li>
-                <li>✓ <strong>Производительность</strong> — кеширование домена сайта</li>
+                <li>✓ <strong>Производительность</strong> — кеширование и оптимизация</li>
             </ul>
         </div>
     </div>
+    
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const tabs = document.querySelectorAll('.universal-tab');
+        const panels = document.querySelectorAll('.universal-panel');
+        
+        tabs.forEach(tab => {
+            tab.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = this.dataset.target;
+                
+                tabs.forEach(t => t.classList.remove('nav-tab-active'));
+                panels.forEach(p => p.style.display = 'none');
+                
+                this.classList.add('nav-tab-active');
+                document.getElementById(target).style.display = 'block';
+            });
+        });
+    });
+    </script>
     <?php
 }
+
+// ============================================
+// CSV ИМПОРТ/ЭКСПОРТ
+// ============================================
+
+/**
+ * Импортирует исключения из CSV файла
+ * 
+ * @param array $file Информация о загруженном файле
+ * @return array Результат импорта
+ */
+function universal_import_csv( $file ) {
+    // Проверяем тип файла
+    if ( $file['type'] !== 'text/csv' && $file['type'] !== 'application/vnd.ms-excel' ) {
+        return array(
+            'success' => false,
+            'message' => 'Неверный формат файла. Используйте CSV.',
+        );
+    }
+    
+    // Проверяем размер файла (максимум 5 МБ)
+    if ( $file['size'] > 5 * 1024 * 1024 ) {
+        return array(
+            'success' => false,
+            'message' => 'Файл слишком большой. Максимум 5 МБ.',
+        );
+    }
+    
+    // Читаем файл
+    $handle = fopen( $file['tmp_name'], 'r' );
+    if ( ! $handle ) {
+        return array(
+            'success' => false,
+            'message' => 'Не удалось открыть файл.',
+        );
+    }
+    
+    $links = array();
+    $count = 0;
+    
+    while ( ( $row = fgetcsv( $handle ) ) !== false ) {
+        if ( ! empty( $row[0] ) ) {
+            $link = trim( $row[0] );
+            if ( ! in_array( $link, $links, true ) ) {
+                $links[] = $link;
+                $count++;
+            }
+        }
+    }
+    
+    fclose( $handle );
+    
+    // Получаем существующие ссылки
+    $existing = universal_get_excluded_links();
+    
+    // Объединяем и удаляем дубликаты
+    $all_links = array_unique( array_merge( $existing, $links ) );
+    
+    // Сохраняем
+    update_option( 'universal_nofollow_excluded_links', implode( "\n", $all_links ) );
+    
+    return array(
+        'success' => true,
+        'message' => 'Загружено ' . $count . ' новых исключений. Всего: ' . count( $all_links ),
+    );
+}
+
+/**
+ * Экспортирует исключения в CSV файл
+ */
+function universal_export_csv() {
+    $links = universal_get_excluded_links();
+    
+    // Устанавливаем заголовки
+    header( 'Content-Type: text/csv; charset=utf-8' );
+    header( 'Content-Disposition: attachment; filename="excluded-links-' . date( 'Y-m-d' ) . '.csv"' );
+    
+    // Открываем вывод
+    $output = fopen( 'php://output', 'w' );
+    
+    // Пишем заголовок
+    fputcsv( $output, array( 'Исключённый URL' ) );
+    
+    // Пишем ссылки
+    foreach ( $links as $link ) {
+        fputcsv( $output, array( $link ) );
+    }
+    
+    fclose( $output );
+}
+
+// ============================================
+// REST API ROUTES
+// ============================================
+
+/**
+ * Регистрирует REST API маршруты
+ */
+function universal_register_rest_routes() {
+    // Маршрут для получения статистики
+    register_rest_route( 'universal-nofollow/v1', '/stats', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => function() {
+            return rest_ensure_response( universal_get_stats() );
+        },
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
+    ) );
+    
+    // Маршрут для получения заблокированных стран
+    register_rest_route( 'universal-nofollow/v1', '/blocked-countries', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => function() {
+            $settings = get_option( 'universal_nofollow_settings', array() );
+            $blocked = isset( $settings['blocked_countries'] ) ? $settings['blocked_countries'] : array();
+            return rest_ensure_response( $blocked );
+        },
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
+    ) );
+    
+    // Маршрут для получения списка стран
+    register_rest_route( 'universal-nofollow/v1', '/countries', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => function() {
+            return rest_ensure_response( universal_get_countries_list() );
+        },
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
+    ) );
+    
+    // Маршрут для получения исключенных ссылок
+    register_rest_route( 'universal-nofollow/v1', '/excluded-links', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => function() {
+            return rest_ensure_response( universal_get_excluded_links() );
+        },
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
+    ) );
+}
+add_action( 'rest_api_init', 'universal_register_rest_routes' );
 
 // ============================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -619,13 +1258,33 @@ function universal_nofollow_activate() {
     // Устанавливаем настройки по умолчанию
     if ( ! get_option( 'universal_nofollow_settings' ) ) {
         $default_settings = array(
-            'post_types' => array(),
-            'block_social' => '0',
+            'post_types'            => array(),
+            'block_social'          => '0',
             'exclude_yandex_market' => '0',
-            'excluded_links' => '',
+            'blocked_countries'     => array(),
+            'excluded_links'        => '',
         );
         add_option( 'universal_nofollow_settings', $default_settings );
     }
+    
+    // Инициализируем список исключений
+    if ( false === get_option( 'universal_nofollow_excluded_links' ) ) {
+        add_option( 'universal_nofollow_excluded_links', '' );
+    }
+    
+    // Инициализируем статистику
+    if ( false === get_option( 'universal_nofollow_stats' ) ) {
+        add_option( 'universal_nofollow_stats', array(
+            'processed'    => 0,
+            'added'        => 0,
+            'excluded'     => 0,
+            'geo_excluded' => 0,
+            'error'        => 0,
+        ) );
+    }
+    
+    // Загружаем список стран (для кеширования)
+    universal_get_countries_list();
     
     do_action( 'universal_nofollow_activated' );
 }
@@ -644,7 +1303,15 @@ register_deactivation_hook( __FILE__, 'universal_nofollow_deactivate' );
  * При удалении плагина
  */
 function universal_nofollow_uninstall() {
-    // Удаляем настройки при удалении плагина
+    // Удаляем все опции и кеши
     delete_option( 'universal_nofollow_settings' );
+    delete_option( 'universal_nofollow_excluded_links' );
+    delete_option( 'universal_nofollow_stats' );
+    delete_transient( 'universal_nofollow_stats_cache' );
+    delete_transient( 'universal_countries_list' );
+    
+    // Удаляем кеши IP адресов
+    global $wpdb;
+    $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'universal_visitor_country_%'" );
 }
 register_uninstall_hook( __FILE__, 'universal_nofollow_uninstall' );
